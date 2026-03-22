@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
         "http://localhost:3001",
     ]
-    ALLOWED_ORIGIN_REGEX: str = r"https://.*\.onrender\.com"
+    ALLOWED_ORIGIN_REGEX: str = r"https://.*\.(onrender\.com|vercel\.app)"
 
     # Auth
     JWT_SECRET_KEY: str = "change-me-for-production"
