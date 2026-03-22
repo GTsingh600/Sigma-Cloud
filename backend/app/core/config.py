@@ -1,9 +1,12 @@
 """
 SigmaCloud AI - Core Configuration
 """
-from pydantic_settings import BaseSettings
-from typing import List
+import json
 import os
+from typing import List
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -35,6 +38,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
         "http://localhost:3001",
     ]
+    ALLOWED_ORIGIN_REGEX: str = r"https://.*\.onrender\.com"
 
     # Auth
     JWT_SECRET_KEY: str = "change-me-for-production"
@@ -48,6 +52,29 @@ class Settings(BaseSettings):
     CV_FOLDS: int = 5
     TEST_SIZE: float = 0.2
     RANDOM_STATE: int = 42
+
+    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @classmethod
+    def parse_allowed_origins(cls, value):
+        if isinstance(value, list):
+            return value
+
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+
+            return [item.strip() for item in raw.split(",") if item.strip()]
+
+        return value
 
     class Config:
         env_file = ".env"
