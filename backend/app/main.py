@@ -6,11 +6,12 @@ Production-grade AutoML Platform
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import re
 from time import perf_counter
 from uuid import uuid4
 
@@ -40,6 +41,19 @@ root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 
 logger = logging.getLogger(__name__)
+
+
+def is_allowed_origin(origin: str | None) -> bool:
+    if not origin:
+        return False
+
+    if origin in settings.ALLOWED_ORIGINS:
+        return True
+
+    if settings.ALLOWED_ORIGIN_REGEX:
+        return re.fullmatch(settings.ALLOWED_ORIGIN_REGEX, origin) is not None
+
+    return False
 
 # Initialize FastAPI
 app = FastAPI(
@@ -73,6 +87,31 @@ app.include_router(training.router, prefix="/api", tags=["Training"])
 app.include_router(models.router, prefix="/api", tags=["Models"])
 app.include_router(predictions.router, prefix="/api", tags=["Predictions"])
 app.include_router(metrics.router, prefix="/api", tags=["Metrics"])
+
+
+@app.middleware("http")
+async def dynamic_cors_middleware(request: Request, call_next):
+    origin = request.headers.get("origin")
+    allowed_origin = origin if is_allowed_origin(origin) else None
+
+    if request.method == "OPTIONS" and origin:
+        if not allowed_origin:
+            logger.warning("Rejected CORS preflight | origin=%s path=%s", origin, request.url.path)
+            return JSONResponse(status_code=400, content={"detail": "CORS origin not allowed"})
+
+        response = Response(status_code=200)
+    else:
+        response = await call_next(request)
+
+    if allowed_origin:
+        response.headers["Access-Control-Allow-Origin"] = allowed_origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        requested_headers = request.headers.get("access-control-request-headers")
+        response.headers["Access-Control-Allow-Headers"] = requested_headers or "*"
+
+    return response
 
 
 @app.middleware("http")
