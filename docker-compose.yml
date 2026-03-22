@@ -1,0 +1,98 @@
+version: "3.9"
+
+services:
+  # ─── PostgreSQL Database ───────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: sigmacloud_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sigmacloud}
+      POSTGRES_USER: ${POSTGRES_USER:-sigma}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sigma_secret_2024}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sigma} -d ${POSTGRES_DB:-sigmacloud}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: sigmacloud_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Backend API ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sigmacloud_backend
+    restart: unless-stopped
+    env_file: ./backend/.env.docker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://sigma:sigma_secret_2024@postgres:5432/sigmacloud}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-["http://localhost:3000","http://127.0.0.1:3000"]}
+    volumes:
+      - model_storage:/app/storage/models
+      - dataset_storage:/app/storage/datasets
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Celery Worker (optional, for production async training) ──────────────
+  # worker:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   container_name: sigmacloud_worker
+  #   command: celery -A app.core.celery_app worker --loglevel=info -c 2
+  #   env_file: ./backend/.env.docker
+  #   environment:
+  #     DATABASE_URL: postgresql://sigma:sigma_secret_2024@postgres:5432/sigmacloud
+  #     REDIS_URL: redis://redis:6379/0
+  #   volumes:
+  #     - model_storage:/app/storage/models
+  #     - dataset_storage:/app/storage/datasets
+  #   depends_on:
+  #     - backend
+
+  # ─── Frontend ─────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    container_name: sigmacloud_frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  model_storage:
+  dataset_storage:
