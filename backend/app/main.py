@@ -3,115 +3,136 @@ SigmaCloud AI - FastAPI Backend
 Production-grade AutoML Platform
 """
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
 import logging
-from logging.handlers import RotatingFileHandler
 import os
-import re
+import time
+from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from time import perf_counter
 from uuid import uuid4
 
-from app.api import auth, datasets, training, models, predictions, metrics
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+
+from app.api import auth, datasets, metrics, models, predictions, training
+from app.api.training import reconcile_stale_jobs
 from app.core.auth import ensure_auth_schema
 from app.core.config import settings
-from app.core.database import engine, Base
+from app.core.database import Base, engine
+
+# Boot timestamp powers the cold-start hint the frontend shows to first-time
+# visitors on a sleepy free tier.
+PROCESS_STARTED_AT = time.time()
 
 
-# File-based logging setup
-LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "logs"))
-os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOG_DIR, "backend.log")
+def configure_logging() -> None:
+    handlers: list[logging.Handler] = []
 
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+    handlers.append(console_handler)
 
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    # Off by default: hosts like Render use ephemeral disks and already collect
+    # stdout, so file logs cost I/O and disappear on restart anyway.
+    if settings.LOG_TO_FILE:
+        log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "logs"))
+        os.makedirs(log_dir, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            os.path.join(log_dir, "backend.log"), maxBytes=5 * 1024 * 1024, backupCount=3
+        )
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        )
+        handlers.append(file_handler)
 
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-root_logger.handlers.clear()
-root_logger.addHandler(file_handler)
-root_logger.addHandler(console_handler)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+    for handler in handlers:
+        root_logger.addHandler(handler)
 
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
-def is_allowed_origin(origin: str | None) -> bool:
-    if not origin:
-        return False
+def warn_on_permissive_cors() -> None:
+    if not settings.ALLOWED_ORIGINS and not settings.ALLOWED_ORIGIN_REGEX:
+        logger.warning(
+            "No CORS origins configured. Set ALLOWED_ORIGINS to your frontend URL, "
+            'e.g. ALLOWED_ORIGINS=["https://your-app.vercel.app"]'
+        )
+    if ".vercel.app" in settings.ALLOWED_ORIGIN_REGEX or ".onrender.com" in settings.ALLOWED_ORIGIN_REGEX:
+        logger.warning(
+            "ALLOWED_ORIGIN_REGEX matches an entire hosting provider. Any site on "
+            "that domain can call this API - narrow it to your own deployments."
+        )
 
-    if origin in settings.ALLOWED_ORIGINS:
-        return True
 
-    if settings.ALLOWED_ORIGIN_REGEX:
-        return re.fullmatch(settings.ALLOWED_ORIGIN_REGEX, origin) is not None
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown work (replaces the deprecated @app.on_event)."""
+    Base.metadata.create_all(bind=engine)
+    ensure_auth_schema(engine)
+    warn_on_permissive_cors()
 
-    return False
+    try:
+        reconcile_stale_jobs()
+    except Exception:
+        logger.exception("Stale job reconciliation failed")
 
-# Initialize FastAPI
+    logger.info("SigmaCloud AI started | env=%s", settings.ENVIRONMENT)
+    logger.info("Model storage: %s", settings.MODEL_STORAGE_PATH)
+    logger.info("Dataset storage: %s", settings.DATASET_STORAGE_PATH)
+
+    yield
+
+    logger.info("SigmaCloud AI shutting down")
+
+
 app = FastAPI(
     title="SigmaCloud AI",
     description="Production-grade AutoML Platform - Train, Compare, and Deploy ML Models",
-    version="1.0.0",
+    version=settings.VERSION,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    lifespan=lifespan,
 )
 
-# Middleware
+# One CORS layer. A second hand-rolled middleware duplicated this and could
+# emit conflicting headers.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    allow_origin_regex=settings.ALLOWED_ORIGIN_REGEX,
+    allow_origin_regex=settings.ALLOWED_ORIGIN_REGEX or None,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "Content-Disposition"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# Mount static files for model downloads
 os.makedirs(settings.MODEL_STORAGE_PATH, exist_ok=True)
 os.makedirs(settings.DATASET_STORAGE_PATH, exist_ok=True)
-app.mount("/static/models", StaticFiles(directory=settings.MODEL_STORAGE_PATH), name="models")
 
-# Include routers
+# NOTE: model artifacts are deliberately NOT mounted as static files. Serving
+# the storage directory would expose every user's .joblib to anyone who can
+# guess a filename; downloads go through the authenticated /api/models/{id}
+# /download route instead.
+
 app.include_router(auth.router, prefix="/api", tags=["Auth"])
 app.include_router(datasets.router, prefix="/api", tags=["Datasets"])
 app.include_router(training.router, prefix="/api", tags=["Training"])
 app.include_router(models.router, prefix="/api", tags=["Models"])
 app.include_router(predictions.router, prefix="/api", tags=["Predictions"])
 app.include_router(metrics.router, prefix="/api", tags=["Metrics"])
-
-
-@app.middleware("http")
-async def dynamic_cors_middleware(request: Request, call_next):
-    origin = request.headers.get("origin")
-    allowed_origin = origin if is_allowed_origin(origin) else None
-
-    if request.method == "OPTIONS" and origin:
-        if not allowed_origin:
-            logger.warning("Rejected CORS preflight | origin=%s path=%s", origin, request.url.path)
-            return JSONResponse(status_code=400, content={"detail": "CORS origin not allowed"})
-
-        response = Response(status_code=200)
-    else:
-        response = await call_next(request)
-
-    if allowed_origin:
-        response.headers["Access-Control-Allow-Origin"] = allowed_origin
-        response.headers["Vary"] = "Origin"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        requested_headers = request.headers.get("access-control-request-headers")
-        response.headers["Access-Control-Allow-Headers"] = requested_headers or "*"
-
-    return response
 
 
 @app.middleware("http")
@@ -162,6 +183,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail, "request_id": request_id},
+        headers=getattr(exc, "headers", None),
     )
 
 
@@ -181,23 +203,27 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database tables on startup."""
-    Base.metadata.create_all(bind=engine)
-    ensure_auth_schema(engine)
-    logger.info("🚀 SigmaCloud AI started successfully")
-    logger.info(f"📊 Model storage: {settings.MODEL_STORAGE_PATH}")
-    logger.info(f"📁 Dataset storage: {settings.DATASET_STORAGE_PATH}")
-
-
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health probe. Also the endpoint a keep-alive pinger should hit."""
+    database_ok = True
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        database_ok = False
+        logger.warning("Health check database probe failed: %s", exc)
+
+    uptime_seconds = round(time.time() - PROCESS_STARTED_AT, 1)
     return {
-        "status": "healthy",
+        "status": "healthy" if database_ok else "degraded",
         "service": "SigmaCloud AI",
-        "version": "1.0.0"
+        "version": settings.VERSION,
+        "database": "up" if database_ok else "down",
+        "uptime_seconds": uptime_seconds,
+        # Under a minute of uptime means this request very likely just woke the
+        # service; the frontend uses it to explain the delay to first visitors.
+        "recently_started": uptime_seconds < 60,
     }
 
 

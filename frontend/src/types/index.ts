@@ -22,6 +22,8 @@ export interface Dataset {
   is_example: boolean;
   preview_data?: Record<string, unknown>[];
   created_at: string;
+  /** False when the backing file was cleared by a host restart. */
+  file_available: boolean;
 }
 
 export interface VisualizationSeries {
@@ -82,6 +84,7 @@ export interface TrainingJob {
   target_column: string;
   status: "pending" | "running" | "completed" | "failed";
   progress: number;
+  progress_message?: string | null;
   error_message?: string;
   created_at: string;
   completed_at?: string;
@@ -117,6 +120,33 @@ export interface TrainedModel {
   cv_std?: number;
   training_time?: number;
   created_at: string;
+  /** False when the .joblib was cleared by a host restart. */
+  file_available: boolean;
+}
+
+export interface ModelFeatures {
+  model_id: number;
+  model_name: string;
+  task_type?: string;
+  feature_names: string[];
+}
+
+export interface DashboardSummary {
+  total_datasets: number;
+  total_models: number;
+  deployed_models: number;
+  completed_jobs: number;
+  failed_jobs: number;
+  running_jobs: number;
+}
+
+export interface HealthStatus {
+  status: "healthy" | "degraded";
+  service: string;
+  version: string;
+  database: "up" | "down";
+  uptime_seconds: number;
+  recently_started: boolean;
 }
 
 export interface MetricsData {

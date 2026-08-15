@@ -52,9 +52,10 @@ That gave me a chance to work across the full stack while still keeping the ML s
 ### Backend
 
 - FastAPI
-- SQLAlchemy
-- Pydantic
+- SQLAlchemy 2.0
+- Pydantic v2
 - JWT auth
+- PostgreSQL driver (psycopg2)
 
 ### ML
 
@@ -123,12 +124,24 @@ For AI/ML roles, I wanted it to show that I understand more than just fitting a 
 
 ```text
 sigmacloud/
-├── backend/        # FastAPI app, APIs, database layer, ML pipeline
+├── backend/
+│   └── app/
+│       ├── api/        # routers: auth, datasets, training, models, predictions, metrics
+│       ├── core/       # config, database, auth
+│       ├── ml/         # AutoML pipeline, EDA, example datasets
+│       ├── models/     # SQLAlchemy models
+│       ├── schemas/    # Pydantic schemas
+│       └── services/   # dataset_builder, model_registry
 ├── frontend/       # Next.js app and dashboard UI
-├── database/       # SQL/bootstrap files
-├── logs/           # runtime logs
+├── database/       # Postgres bootstrap (extensions only - SQLAlchemy owns the schema)
+├── render.yaml     # Render blueprint
 └── docker-compose.yml
 ```
+
+## Running it
+
+- Deployment (Render + Vercel, or Docker Compose): [DEPLOYMENT.md](DEPLOYMENT.md)
+- Configuration reference: [backend/.env.example](backend/.env.example)
 
 ## A few implementation details I’m happy with
 
@@ -137,16 +150,28 @@ sigmacloud/
 - The backend and frontend are separated cleanly enough that the system feels extensible rather than hardcoded around one demo.
 - The project is structured like an application I could keep improving, not just a one-time showcase.
 
+## Running on free infrastructure
+
+The live demo runs on a free tier, which sleeps when idle and clears its disk on
+restart. Rather than hide that, the app is built to degrade honestly:
+
+- the landing page tells visitors the first request takes up to 60 seconds
+- session restore waits for the wake-up and retries, instead of signing users out on a timeout
+- a progress notice explains the delay while it is happening
+- datasets and models whose files were cleared are labelled, not silently broken
+- training jobs killed by a restart are reconciled to `failed` with an explanation
+
 ## What I’d improve next
 
-If I continue building on this, the next things I’d add are:
-
-- Alembic migrations for cleaner schema evolution
-- dedicated workers for longer training jobs
+- Alembic migrations (schema changes are currently additive and applied at startup)
+- dedicated Celery workers so training leaves the API process
 - object storage for datasets and model artifacts
 - richer experiment tracking
 - more explainability and model monitoring features
 
 ## Resume version
 
-Built a full-stack AutoML platform using FastAPI, Next.js, SQLAlchemy, and scikit-learn/XGBoost/LightGBM that lets users upload datasets, analyze data quality, train and compare multiple ML models, deploy selected models, and run live predictions through a web dashboard.
+Built a full-stack AutoML platform using FastAPI, Next.js, SQLAlchemy, and
+scikit-learn/XGBoost/LightGBM that lets users upload datasets, analyze data
+quality, train and compare multiple ML models, deploy selected models, and run
+live predictions through a web dashboard.

@@ -1,15 +1,19 @@
 "use client";
 import { useState, useCallback, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
-import { datasetsAPI } from "@/lib/api";
+import { datasetsAPI, describeApiError } from "@/lib/api";
 import { logToFile } from "@/lib/logger";
 import { Dataset, ExampleDataset } from "@/types";
 import Link from "next/link";
 import toast from "react-hot-toast";
 import {
-  Upload, Database, Trash2, Table, Info,
+  Upload, Database, Trash2, Table, Info, AlertTriangle,
   CloudUpload, FileSpreadsheet, Loader2, Sparkles
 } from "lucide-react";
+import { StatusPill } from "@/components/common/ui";
+
+// Kept in step with MAX_UPLOAD_BYTES on the backend.
+const MAX_UPLOAD_SIZE = 25 * 1024 * 1024;
 
 function formatBytes(bytes?: number) {
   if (!bytes) return "-";
@@ -19,7 +23,7 @@ function formatBytes(bytes?: number) {
 }
 
 export default function DatasetsPage() {
-  const maxUploadSize = 100 * 1024 * 1024;
+  const maxUploadSize = MAX_UPLOAD_SIZE;
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [examples, setExamples] = useState<ExampleDataset[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -32,7 +36,7 @@ export default function DatasetsPage() {
       const res = await datasetsAPI.list();
       setDatasets(res.data);
     } catch (e: any) {
-      toast.error("Could not connect to backend");
+      toast.error(describeApiError(e, "Could not connect to backend"));
       logToFile(`Backend not connected when fetching datasets: ${e?.message || e}`, "error");
     }
   };
@@ -57,7 +61,7 @@ export default function DatasetsPage() {
       logToFile(`Upload success: ${file.name}`, "info");
       fetchDatasets();
     } catch (e: any) {
-      toast.error(e.response?.data?.detail || "Upload failed");
+      toast.error(describeApiError(e, "Upload failed"));
       logToFile(`Upload failed: ${file.name} | ${e?.message || e}`, "error");
     } finally {
       setUploading(false);
@@ -138,7 +142,9 @@ export default function DatasetsPage() {
             <p className="text-sm text-sigma-400 mb-1">
               {uploading ? "Uploading..." : isDragActive ? "Drop it here." : "Drag and drop your CSV or Excel file"}
             </p>
-            <p className="text-xs text-sigma-600">or click to browse | Max 100MB</p>
+            <p className="text-xs text-sigma-600">
+              or click to browse · Max {Math.round(maxUploadSize / (1024 * 1024))}MB
+            </p>
           </div>
         </div>
 
@@ -195,8 +201,17 @@ export default function DatasetsPage() {
                 {datasets.map((ds) => (
                   <tr key={ds.id} className="border-b border-sigma-900/50 hover:bg-sigma-900/20">
                     <td className="py-3 font-medium text-white">
-                      {ds.is_example && <span className="metric-badge bg-sigma-800/60 text-sigma-400 mr-2">example</span>}
-                      {ds.name}
+                      <div className="flex items-center gap-2">
+                        {ds.is_example && <span className="metric-badge bg-sigma-800/60 text-sigma-400">example</span>}
+                        <span>{ds.name}</span>
+                        {!ds.file_available && (
+                          <span title="File cleared by a server restart - re-upload to use this dataset">
+                            <StatusPill tone="warning" icon={AlertTriangle}>
+                              file cleared
+                            </StatusPill>
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="py-3 text-sigma-400">{ds.num_rows?.toLocaleString()}</td>
                     <td className="py-3 text-sigma-400">{ds.num_columns}</td>
@@ -211,10 +226,18 @@ export default function DatasetsPage() {
                     </td>
                     <td className="py-3">
                       <div className="flex gap-2">
-                        <button onClick={() => setSelectedDataset(selectedDataset?.id === ds.id ? null : ds)} className="p-1.5 rounded hover:bg-sigma-800 text-sigma-500 hover:text-sigma-300 transition-colors">
+                        <button
+                          onClick={() => setSelectedDataset(selectedDataset?.id === ds.id ? null : ds)}
+                          aria-label={`Preview ${ds.name}`}
+                          className="p-1.5 rounded hover:bg-sigma-800 text-sigma-500 hover:text-sigma-300 transition-colors"
+                        >
                           <Table className="w-3.5 h-3.5" />
                         </button>
-                        <button onClick={() => deleteDataset(ds.id)} className="p-1.5 rounded hover:bg-sigma-500/10 text-sigma-500 hover:text-sigma-400 transition-colors">
+                        <button
+                          onClick={() => deleteDataset(ds.id)}
+                          aria-label={`Delete ${ds.name}`}
+                          className="p-1.5 rounded hover:bg-sigma-500/10 text-sigma-500 hover:text-sigma-400 transition-colors"
+                        >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>

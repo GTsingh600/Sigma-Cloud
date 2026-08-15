@@ -3,7 +3,7 @@ import Link from "next/link";
 import {
   BrainCircuit, Database, BarChart3, Rocket,
   ArrowRight, CheckCircle, Activity, Zap,
-  ChevronRight, Shield, GitBranch
+  ChevronRight, Shield, GitBranch, Clock
 } from "lucide-react";
 import LandingAuthActions from "@/components/auth/LandingAuthActions";
 import { useAuth } from "@/components/auth/AuthProvider";
@@ -80,6 +80,21 @@ export default function LandingPage() {
 
           <div id="google-signin" className="mt-8 flex justify-center">
             <LandingAuthActions />
+          </div>
+
+          {/*
+            Set expectations before the first click. This is a live demo on a
+            free tier that sleeps when idle, and an unexplained 60s wait reads
+            as a broken app to anyone evaluating the project.
+          */}
+          <div className="mx-auto mt-10 flex max-w-xl items-start gap-3 rounded-2xl border border-sigma-700/50 bg-sigma-950/40 p-4 text-left">
+            <Clock className="mt-0.5 h-4 w-4 flex-shrink-0 text-sigma-400" />
+            <p className="text-sm leading-6 text-sigma-400">
+              <span className="font-medium text-sigma-200">First load takes up to 60 seconds.</span>{" "}
+              The API is hosted on a free tier that sleeps when idle, so the first
+              request has to wake it. Everything is fast once it is running — and
+              training a model on an example dataset takes only a few seconds.
+            </p>
           </div>
 
           {/* Stats row */}

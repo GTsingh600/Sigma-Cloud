@@ -5,6 +5,7 @@ Returns comparison metrics and visualization data.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
@@ -97,7 +98,11 @@ def get_metrics(
             {
                 "rank": index + 1,
                 "model_name": item["model_name"],
-                "primary_metric": item.get("accuracy") or item.get("r2_score"),
+                # Selected by task type, not `a or b`: an accuracy of exactly
+                # 0.0 is falsy and used to fall through to the r2_score key.
+                "primary_metric": (
+                    item.get("accuracy") if task_type == "classification" else item.get("r2_score")
+                ),
                 "metric_name": "accuracy" if task_type == "classification" else "r2_score",
                 "training_time": item.get("training_time"),
             }
@@ -111,10 +116,39 @@ def get_dashboard_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Counts for the dashboard tiles.
+
+    Aggregated with grouped COUNT queries rather than one round trip per tile -
+    the previous version issued five separate COUNT(*) statements, which is
+    noticeably slow against a remote managed Postgres.
+    """
+    user_id = current_user.id
+
+    job_counts = dict(
+        db.query(TrainingJob.status, func.count(TrainingJob.id))
+        .filter(TrainingJob.user_id == user_id)
+        .group_by(TrainingJob.status)
+        .all()
+    )
+
+    model_totals = (
+        db.query(
+            func.count(TrainedModel.id),
+            func.sum(case((TrainedModel.is_deployed.is_(True), 1), else_=0)),
+        )
+        .filter(TrainedModel.user_id == user_id)
+        .one()
+    )
+
+    total_datasets = (
+        db.query(func.count(Dataset.id)).filter(Dataset.user_id == user_id).scalar() or 0
+    )
+
     return {
-        "total_datasets": db.query(Dataset).filter(Dataset.user_id == current_user.id).count(),
-        "total_models": db.query(TrainedModel).filter(TrainedModel.user_id == current_user.id).count(),
-        "deployed_models": db.query(TrainedModel).filter(TrainedModel.user_id == current_user.id, TrainedModel.is_deployed == True).count(),
-        "completed_jobs": db.query(TrainingJob).filter(TrainingJob.user_id == current_user.id, TrainingJob.status == "completed").count(),
-        "failed_jobs": db.query(TrainingJob).filter(TrainingJob.user_id == current_user.id, TrainingJob.status == "failed").count(),
+        "total_datasets": int(total_datasets),
+        "total_models": int(model_totals[0] or 0),
+        "deployed_models": int(model_totals[1] or 0),
+        "completed_jobs": int(job_counts.get("completed", 0)),
+        "failed_jobs": int(job_counts.get("failed", 0)),
+        "running_jobs": int(job_counts.get("running", 0) + job_counts.get("pending", 0)),
     }

@@ -127,3 +127,158 @@ code, pre, .font-mono {
   border: 1px solid rgba(170, 205, 220, 0.2);
   background: rgba(170, 205, 220, 0.08);
 }
+
+/* ─── Focus visibility ──────────────────────────────────────────────────────
+   Buttons and inputs previously relied on hover alone, leaving keyboard users
+   with no indication of position. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--sigma-neon-soft);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.btn-primary:disabled,
+.btn-outline:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-primary:active:not(:disabled),
+.btn-outline:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn-danger {
+  @apply font-medium px-5 py-2.5 rounded-xl transition-all duration-200 inline-flex items-center gap-2;
+  border: 1px solid rgba(244, 133, 133, 0.32);
+  color: #fecaca;
+  background: rgba(244, 133, 133, 0.1);
+}
+.btn-danger:hover:not(:disabled) {
+  background: rgba(244, 133, 133, 0.18);
+  border-color: rgba(244, 133, 133, 0.5);
+}
+
+/* ─── Form controls ─────────────────────────────────────────────────────── */
+.sigma-input,
+.sigma-select,
+.sigma-textarea {
+  @apply w-full rounded-xl px-3.5 py-2.5 text-sm transition-all duration-200;
+  background: rgba(22, 29, 35, 0.72);
+  border: 1px solid var(--sigma-border);
+  color: var(--sigma-text);
+}
+.sigma-input::placeholder,
+.sigma-textarea::placeholder {
+  color: rgba(210, 196, 180, 0.4);
+}
+.sigma-input:hover,
+.sigma-select:hover,
+.sigma-textarea:hover {
+  border-color: rgba(170, 205, 220, 0.34);
+}
+.sigma-input:focus,
+.sigma-select:focus,
+.sigma-textarea:focus {
+  border-color: var(--sigma-neon-soft);
+  background: rgba(22, 29, 35, 0.94);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(129, 166, 198, 0.16);
+}
+.sigma-textarea {
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1.6;
+  resize: vertical;
+}
+.sigma-label {
+  @apply mb-1.5 block text-xs font-medium uppercase tracking-wider;
+  color: var(--sigma-muted);
+}
+.sigma-hint {
+  @apply mt-1.5 text-xs;
+  color: rgba(210, 196, 180, 0.55);
+}
+
+/* ─── Data table ────────────────────────────────────────────────────────── */
+.sigma-table {
+  @apply w-full text-sm border-collapse;
+}
+.sigma-table thead th {
+  @apply px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap;
+  color: var(--sigma-muted);
+  background: rgba(22, 29, 35, 0.85);
+  border-bottom: 1px solid var(--sigma-border);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.sigma-table tbody td {
+  @apply px-3 py-2.5 whitespace-nowrap;
+  border-bottom: 1px solid rgba(129, 166, 198, 0.1);
+  color: var(--sigma-text);
+}
+.sigma-table tbody tr {
+  transition: background-color 0.15s;
+}
+.sigma-table tbody tr:hover {
+  background: rgba(129, 166, 198, 0.06);
+}
+
+/* Wide content scrolls inside its own container, never the page body. */
+.sigma-scroll-x {
+  @apply overflow-x-auto;
+  max-width: 100%;
+}
+
+/* ─── Loading skeleton ──────────────────────────────────────────────────── */
+.sigma-skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(129, 166, 198, 0.07) 25%,
+    rgba(170, 205, 220, 0.14) 37%,
+    rgba(129, 166, 198, 0.07) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeletonShimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeletonShimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+
+/* ─── Entrance motion ───────────────────────────────────────────────────── */
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: fadeSlideIn 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Stagger list items without a per-item style attribute. */
+.stagger-children > * {
+  animation: fadeSlideIn 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0.02s; }
+.stagger-children > *:nth-child(2) { animation-delay: 0.06s; }
+.stagger-children > *:nth-child(3) { animation-delay: 0.1s; }
+.stagger-children > *:nth-child(4) { animation-delay: 0.14s; }
+.stagger-children > *:nth-child(5) { animation-delay: 0.18s; }
+.stagger-children > *:nth-child(6) { animation-delay: 0.22s; }
+.stagger-children > *:nth-child(n + 7) { animation-delay: 0.26s; }
+
+/* Respect users who have asked the OS to reduce motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

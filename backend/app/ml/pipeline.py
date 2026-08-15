@@ -12,6 +12,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier, LGBMRegressor
+from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import (
     AdaBoostClassifier,
@@ -86,10 +87,23 @@ class AutoMLPipeline:
     def detect_task_type(self, y: pd.Series) -> str:
         n_unique = y.nunique()
         dtype = y.dtype
-        if dtype == "object" or dtype == "bool":
+
+        if dtype == "object" or dtype == "bool" or str(dtype) == "category":
             return "classification"
+
+        # A small integer-valued target with few distinct values is almost
+        # always a class label. The ratio test alone mislabels small datasets:
+        # a 30-row binary target scores 2/30 = 0.067 and used to fall through
+        # to regression.
+        is_integral = pd.api.types.is_integer_dtype(y) or (
+            pd.api.types.is_float_dtype(y) and float(y.dropna().mod(1).abs().max() or 0) == 0.0
+        )
+        if is_integral and n_unique <= 20:
+            return "classification"
+
         if n_unique <= 20 and n_unique / max(len(y), 1) < 0.05:
             return "classification"
+
         return "regression"
 
     def build_training_plan(
@@ -189,9 +203,13 @@ class AutoMLPipeline:
         )
 
         if task_type == "classification":
-            if y.dtype == "object" or y.dtype == "bool":
+            if not pd.api.types.is_numeric_dtype(y) or pd.api.types.is_bool_dtype(y):
                 self.label_encoder = LabelEncoder()
-                y = pd.Series(self.label_encoder.fit_transform(y.astype(str)), name=target_column)
+                y = pd.Series(
+                    self.label_encoder.fit_transform(y.astype(str)),
+                    name=target_column,
+                    index=y.index,
+                )
                 cleaning_steps.append("Encoded target labels into numeric classes.")
 
         stratify_target = y if task_type == "classification" and y.nunique() < 20 else None
@@ -216,28 +234,44 @@ class AutoMLPipeline:
             if estimator is None:
                 return {}
 
-            transformed_features: List[str] = []
+            if hasattr(estimator, "feature_importances_"):
+                importances = np.asarray(estimator.feature_importances_, dtype=float)
+            elif hasattr(estimator, "coef_"):
+                importances = np.abs(np.asarray(estimator.coef_, dtype=float)).ravel()
+            else:
+                return {}
+
+            # Width per original column, taken from each transformer's own
+            # fitted state. Deriving it by name-prefix matching silently
+            # misaligned every subsequent column whenever one feature name was
+            # a prefix of another (e.g. "age" and "age_group").
+            column_widths: List[Tuple[str, int]] = []
             for name, transformer, cols in preprocessor.transformers_:
                 if name == "num":
-                    transformed_features.extend(cols)
+                    column_widths.extend((column, 1) for column in cols)
                 elif name == "cat":
                     encoder = transformer.named_steps.get("encoder")
-                    if encoder and hasattr(encoder, "get_feature_names_out"):
-                        transformed_features.extend(encoder.get_feature_names_out(cols).tolist())
+                    categories = getattr(encoder, "categories_", None)
+                    if categories is None:
+                        column_widths.extend((column, 1) for column in cols)
+                    else:
+                        column_widths.extend(
+                            (column, len(values)) for column, values in zip(cols, categories)
+                        )
 
-            if hasattr(estimator, "feature_importances_"):
-                importances = estimator.feature_importances_
-            elif hasattr(estimator, "coef_"):
-                importances = np.abs(estimator.coef_).flatten()
-            else:
+            expected_width = sum(width for _, width in column_widths)
+            if expected_width != importances.shape[0]:
+                logger.warning(
+                    "Feature importance width mismatch (expected %s, got %s) - skipping",
+                    expected_width,
+                    importances.shape[0],
+                )
                 return {}
 
             grouped: Dict[str, float] = {}
             offset = 0
-            for feature_name in feature_names:
-                matching = [name for name in transformed_features if name == feature_name or name.startswith(f"{feature_name}_")]
-                width = len(matching) if matching else 1
-                grouped[feature_name] = float(np.sum(importances[offset:offset + width]))
+            for column, width in column_widths:
+                grouped[column] = float(np.sum(importances[offset:offset + width]))
                 offset += width
 
             total = sum(grouped.values())
@@ -281,13 +315,20 @@ class AutoMLPipeline:
 
         metrics["confusion_matrix"] = confusion_matrix(y_test, y_pred).tolist()
 
-        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=settings.RANDOM_STATE)
-        full_X = pd.concat([X_train, X_test])
-        full_y = pd.concat([y_train, y_test])
-        cv_scores = cross_val_score(pipeline, full_X, full_y, cv=cv, scoring="accuracy")
-        metrics["cv_scores"] = cv_scores.tolist()
-        metrics["cv_mean"] = float(cv_scores.mean())
-        metrics["cv_std"] = float(cv_scores.std())
+        # Cross-validate on the training split only. Folding over train+test
+        # let the held-out rows influence the CV score, so the two numbers were
+        # not independent - and it refit on 25% more data every fold.
+        effective_folds = self._safe_fold_count(y_train, cv_folds, stratified=True)
+        if effective_folds:
+            cv = StratifiedKFold(
+                n_splits=effective_folds, shuffle=True, random_state=settings.RANDOM_STATE
+            )
+            cv_scores = cross_val_score(pipeline, X_train, y_train, cv=cv, scoring="accuracy")
+            metrics["cv_scores"] = cv_scores.tolist()
+            metrics["cv_mean"] = float(cv_scores.mean())
+            metrics["cv_std"] = float(cv_scores.std())
+            metrics["cv_folds"] = effective_folds
+
         return metrics
 
     def evaluate_regression(
@@ -310,14 +351,36 @@ class AutoMLPipeline:
             },
         }
 
-        cv = KFold(n_splits=cv_folds, shuffle=True, random_state=settings.RANDOM_STATE)
-        full_X = pd.concat([X_train, X_test])
-        full_y = pd.concat([y_train, y_test])
-        cv_scores = cross_val_score(pipeline, full_X, full_y, cv=cv, scoring="r2")
-        metrics["cv_scores"] = cv_scores.tolist()
-        metrics["cv_mean"] = float(cv_scores.mean())
-        metrics["cv_std"] = float(cv_scores.std())
+        # See evaluate_classification: CV runs on the training split only.
+        effective_folds = self._safe_fold_count(y_train, cv_folds, stratified=False)
+        if effective_folds:
+            cv = KFold(n_splits=effective_folds, shuffle=True, random_state=settings.RANDOM_STATE)
+            cv_scores = cross_val_score(pipeline, X_train, y_train, cv=cv, scoring="r2")
+            metrics["cv_scores"] = cv_scores.tolist()
+            metrics["cv_mean"] = float(cv_scores.mean())
+            metrics["cv_std"] = float(cv_scores.std())
+            metrics["cv_folds"] = effective_folds
+
         return metrics
+
+    @staticmethod
+    def _safe_fold_count(y_train, requested_folds: int, stratified: bool) -> int:
+        """Clamp folds to what the training split can actually support.
+
+        StratifiedKFold raises when a class has fewer members than folds, which
+        previously failed the whole model instead of degrading the CV estimate.
+        Returns 0 when cross-validation is not possible at all.
+        """
+        n_samples = len(y_train)
+        if n_samples < 4:
+            return 0
+
+        folds = min(requested_folds, n_samples)
+        if stratified:
+            smallest_class = int(pd.Series(y_train).value_counts().min())
+            folds = min(folds, smallest_class)
+
+        return folds if folds >= 2 else 0
 
     def train_all_models(
         self,
@@ -356,7 +419,12 @@ class AutoMLPipeline:
             try:
                 start = time.time()
                 step_name = "classifier" if task_type == "classification" else "regressor"
-                pipeline = Pipeline([("preprocessor", preprocessor), (step_name, estimator)])
+                # Clone the preprocessor per model: sharing one fitted instance
+                # across every pipeline in the loop means each fit mutates the
+                # state the previously-saved models still reference.
+                pipeline = Pipeline(
+                    [("preprocessor", clone(preprocessor)), (step_name, estimator)]
+                )
                 pipeline.fit(X_train, y_train)
                 training_time = time.time() - start
 
@@ -366,7 +434,9 @@ class AutoMLPipeline:
                     else self.evaluate_regression(pipeline, X_test, y_test, X_train, y_train, cv_folds)
                 )
 
-                feature_importance = self.get_feature_importances(pipeline, preprocessor, feature_names)
+                feature_importance = self.get_feature_importances(
+                    pipeline, pipeline.named_steps["preprocessor"], feature_names
+                )
                 model_filename = f"{self.job_id}_{model_name.replace(' ', '_')}.joblib"
                 model_path = os.path.join(settings.MODEL_STORAGE_PATH, model_filename)
                 joblib.dump(
@@ -430,8 +500,30 @@ class AutoMLPipeline:
         }
 
     def _classify_features(self, X: pd.DataFrame, target_column: str | None = None) -> Tuple[List[str], List[str]]:
-        num_cols = X.select_dtypes(include=["int64", "float64"]).columns.tolist()
-        cat_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+        """Split columns into numeric and categorical.
+
+        Uses dtype predicates rather than an explicit int64/float64 list:
+        database imports routinely produce int32, float32, nullable Int64 and
+        Decimal columns, all of which were previously dropped from both groups
+        and silently excluded from training.
+        """
+        num_cols: List[str] = []
+        cat_cols: List[str] = []
+
+        for column in X.columns:
+            series = X[column]
+
+            if pd.api.types.is_bool_dtype(series):
+                cat_cols.append(column)
+            elif pd.api.types.is_numeric_dtype(series):
+                num_cols.append(column)
+            elif pd.api.types.is_datetime64_any_dtype(series):
+                # Raw timestamps are not usable by these estimators and would
+                # blow up one-hot encoding; skipped rather than mis-encoded.
+                continue
+            else:
+                cat_cols.append(column)
+
         return num_cols, cat_cols
 
     def _build_cleaning_preview(

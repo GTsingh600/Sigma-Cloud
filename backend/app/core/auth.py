@@ -1,6 +1,7 @@
 """
 Authentication helpers for Google sign-in and app JWT sessions.
 """
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, status
@@ -16,6 +17,8 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.db_models import User
 
+
+logger = logging.getLogger(__name__)
 
 security = HTTPBearer(auto_error=False)
 
@@ -107,22 +110,42 @@ def get_current_user(
     return user
 
 
+# Additive column upgrades applied at startup.
+#
+# SQLAlchemy's create_all() creates missing TABLES but never alters existing
+# ones, so a column added to a model after a database already exists would be
+# missing at runtime. This keeps deployed instances working across upgrades
+# without a migration tool; Alembic is the right answer once schema changes
+# stop being purely additive.
+_COLUMN_UPGRADES: dict[str, dict[str, str]] = {
+    "datasets": {
+        "user_id": "INTEGER",
+    },
+    "training_jobs": {
+        "user_id": "INTEGER",
+        "progress_message": "VARCHAR(255)",
+    },
+    "trained_models": {
+        "user_id": "INTEGER",
+    },
+}
+
+
 def ensure_auth_schema(engine: Engine) -> None:
+    """Add any columns missing from tables that already exist."""
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
-    if "users" not in existing_tables:
-        return
 
-    table_columns = {
-        table: {column["name"] for column in inspector.get_columns(table)}
-        for table in ("datasets", "training_jobs", "trained_models")
-        if table in existing_tables
-    }
+    for table, columns in _COLUMN_UPGRADES.items():
+        if table not in existing_tables:
+            continue
 
-    with engine.begin() as connection:
-        if "datasets" in table_columns and "user_id" not in table_columns["datasets"]:
-            connection.execute(text("ALTER TABLE datasets ADD COLUMN user_id INTEGER"))
-        if "training_jobs" in table_columns and "user_id" not in table_columns["training_jobs"]:
-            connection.execute(text("ALTER TABLE training_jobs ADD COLUMN user_id INTEGER"))
-        if "trained_models" in table_columns and "user_id" not in table_columns["trained_models"]:
-            connection.execute(text("ALTER TABLE trained_models ADD COLUMN user_id INTEGER"))
+        present = {column["name"] for column in inspector.get_columns(table)}
+        missing = {name: sql_type for name, sql_type in columns.items() if name not in present}
+        if not missing:
+            continue
+
+        with engine.begin() as connection:
+            for name, sql_type in missing.items():
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+                logger.info("Schema upgrade: added %s.%s", table, name)

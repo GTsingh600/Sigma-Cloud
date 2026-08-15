@@ -14,10 +14,16 @@ from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.models.db_models import TrainedModel, User
 from app.schemas.schemas import ModelResponse
+from app.services import model_registry
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+MISSING_ARTIFACT_DETAIL = (
+    "This model's file is no longer on disk. Free hosting tiers clear storage "
+    "when the service restarts - retrain to recreate it."
+)
 
 
 def get_owned_model(model_id: int, user_id: int, db: Session) -> TrainedModel:
@@ -30,13 +36,14 @@ def get_owned_model(model_id: int, user_id: int, db: Session) -> TrainedModel:
 @router.get("/models", response_model=List[ModelResponse])
 def list_models(
     job_id: Optional[str] = None,
+    limit: int = 200,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     query = db.query(TrainedModel).filter(TrainedModel.user_id == current_user.id)
     if job_id:
         query = query.filter(TrainedModel.job_id == job_id)
-    return query.order_by(TrainedModel.created_at.desc()).all()
+    return query.order_by(TrainedModel.created_at.desc()).limit(min(max(limit, 1), 500)).all()
 
 
 @router.get("/models/{model_id}", response_model=ModelResponse)
@@ -55,12 +62,14 @@ def deploy_model(
     current_user: User = Depends(get_current_user),
 ):
     model = get_owned_model(model_id, current_user.id, db)
+    if not model.file_available:
+        raise HTTPException(status_code=409, detail=MISSING_ARTIFACT_DETAIL)
 
     db.query(TrainedModel).filter(
         TrainedModel.user_id == current_user.id,
         TrainedModel.job_id == model.job_id,
         TrainedModel.id != model_id,
-    ).update({"is_deployed": False})
+    ).update({"is_deployed": False}, synchronize_session=False)
 
     model.is_deployed = True
     db.commit()
@@ -87,8 +96,8 @@ def download_model(
     current_user: User = Depends(get_current_user),
 ):
     model = get_owned_model(model_id, current_user.id, db)
-    if not model.file_path or not os.path.exists(model.file_path):
-        raise HTTPException(status_code=404, detail="Model file not found on disk")
+    if not model.file_available:
+        raise HTTPException(status_code=409, detail=MISSING_ARTIFACT_DETAIL)
 
     filename = f"{model.model_name.replace(' ', '_')}_{model_id}.joblib"
     return FileResponse(path=model.file_path, media_type="application/octet-stream", filename=filename)
@@ -101,10 +110,18 @@ def delete_model(
     current_user: User = Depends(get_current_user),
 ):
     model = get_owned_model(model_id, current_user.id, db)
-
-    if model.file_path and os.path.exists(model.file_path):
-        os.remove(model.file_path)
+    file_path = model.file_path
 
     db.delete(model)
     db.commit()
+
+    # Drop the cached artifact so a deleted model stops answering predictions.
+    model_registry.invalidate(model_id)
+
+    if file_path and os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except OSError as exc:
+            logger.warning("Could not remove model file %s: %s", file_path, exc)
+
     return {"message": "Model deleted successfully"}

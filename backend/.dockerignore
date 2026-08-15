@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Never bake secrets or local state into the image
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite3
+storage/
+logs/
+*.joblib
+*.pkl
+
+.git/
+.gitignore
+.vscode/
+.idea/
