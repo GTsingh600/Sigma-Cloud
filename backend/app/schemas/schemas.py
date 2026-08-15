@@ -57,6 +57,7 @@ class DatasetResponse(DatasetBase):
     is_example: bool
     preview_data: Optional[List[Dict[str, Any]]]
     created_at: datetime
+    file_available: bool = True
 
     class Config:
         from_attributes = True
@@ -147,6 +148,7 @@ class TrainingJobResponse(BaseModel):
     target_column: str
     status: str
     progress: int
+    progress_message: Optional[str] = None
     error_message: Optional[str]
     created_at: datetime
     completed_at: Optional[datetime]
@@ -177,6 +179,7 @@ class ModelResponse(BaseModel):
     cv_scores: Optional[List[float]]
     training_time: Optional[float]
     created_at: datetime
+    file_available: bool = True
 
     class Config:
         from_attributes = True
@@ -195,6 +198,13 @@ class PredictionResponse(BaseModel):
     prediction: Any
     probability: Optional[Dict[str, float]] = None
     confidence: Optional[float] = None
+
+
+class ModelFeaturesResponse(BaseModel):
+    model_id: int
+    model_name: str
+    task_type: Optional[str] = None
+    feature_names: List[str]
 
 
 # ─── Metrics Schemas ──────────────────────────────────────────────────────────

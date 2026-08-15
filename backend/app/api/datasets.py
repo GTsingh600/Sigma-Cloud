@@ -3,7 +3,6 @@ SigmaCloud AI - Datasets API Router
 Handles dataset upload, listing, and example datasets.
 """
 import os
-import uuid
 import logging
 from typing import List, Optional
 
@@ -18,12 +17,18 @@ from app.ml.datasets import EXAMPLE_DATASETS
 from app.ml.eda import generate_dataset_analysis, load_dataset_dataframe
 from app.models.db_models import Dataset, TrainingJob, TrainedModel, User
 from app.schemas.schemas import DatasetAnalysisResponse, DatasetResponse
+from app.services.dataset_builder import (
+    analyze_dataframe,
+    build_preview,
+    normalize_column_names,
+    safe_storage_filename,
+)
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE = 100 * 1024 * 1024
+ALLOWED_EXTENSIONS = (".csv", ".xlsx", ".xls")
 
 
 def get_owned_dataset_or_404(dataset_id: int, user_id: int, db: Session) -> Dataset:
@@ -31,6 +36,20 @@ def get_owned_dataset_or_404(dataset_id: int, user_id: int, db: Session) -> Data
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     return dataset
+
+
+def require_dataset_file(dataset: Dataset) -> str:
+    """Fail with an actionable message when storage was wiped."""
+    if dataset.file_available:
+        return dataset.file_path
+
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "This dataset's file is no longer on disk. Free hosting tiers clear "
+            "storage when the service restarts - please re-upload it."
+        ),
+    )
 
 
 def build_explainability_payload(dataset_id: int, user_id: int, db: Session):
@@ -93,31 +112,6 @@ def build_explainability_payload(dataset_id: int, user_id: int, db: Session):
     }
 
 
-def analyze_dataframe(df: pd.DataFrame) -> List[dict]:
-    columns_info = []
-    for col in df.columns:
-        col_data = df[col]
-        info = {
-            "name": col,
-            "dtype": str(col_data.dtype),
-            "null_count": int(col_data.isnull().sum()),
-            "unique_count": int(col_data.nunique()),
-            "sample_values": col_data.dropna().head(5).tolist(),
-        }
-
-        if col_data.dtype in ["int64", "float64"]:
-            info["stats"] = {
-                "min": float(col_data.min()) if not col_data.empty else None,
-                "max": float(col_data.max()) if not col_data.empty else None,
-                "mean": float(col_data.mean()) if not col_data.empty else None,
-                "std": float(col_data.std()) if not col_data.empty else None,
-                "median": float(col_data.median()) if not col_data.empty else None,
-            }
-
-        columns_info.append(info)
-    return columns_info
-
-
 @router.post("/upload-dataset", response_model=DatasetResponse)
 async def upload_dataset(
     file: UploadFile = File(...),
@@ -126,35 +120,49 @@ async def upload_dataset(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if not file.filename.endswith((".csv", ".xlsx", ".xls")):
+    original_name = os.path.basename(file.filename or "")
+    if not original_name.lower().endswith(ALLOWED_EXTENSIONS):
         raise HTTPException(status_code=400, detail="Only CSV and Excel files are supported.")
 
     content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail="File too large. Max 100MB.")
+    max_bytes = settings.MAX_UPLOAD_BYTES
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Max {max_bytes // (1024 * 1024)}MB on this deployment.",
+        )
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
-    file_id = str(uuid.uuid4())[:8]
-    safe_name = f"user_{current_user.id}_{file_id}_{file.filename}"
-    file_path = os.path.join(settings.DATASET_STORAGE_PATH, safe_name)
+    # Filename comes straight from the client and is never trusted as a path.
+    stored_name = safe_storage_filename(original_name, current_user.id)
+    file_path = os.path.join(settings.DATASET_STORAGE_PATH, stored_name)
+    os.makedirs(settings.DATASET_STORAGE_PATH, exist_ok=True)
 
     with open(file_path, "wb") as saved_file:
         saved_file.write(content)
 
     try:
-        if file.filename.endswith(".csv"):
+        if original_name.lower().endswith(".csv"):
             df = pd.read_csv(file_path)
         else:
             df = pd.read_excel(file_path)
     except Exception as exc:
-        logger.exception("Failed to parse uploaded dataset '%s': %s", file.filename, exc)
+        logger.exception("Failed to parse uploaded dataset '%s': %s", original_name, exc)
         if os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(status_code=422, detail=f"Could not parse file: {exc}") from exc
 
+    if df.empty or len(df.columns) == 0:
+        os.remove(file_path)
+        raise HTTPException(status_code=422, detail="The file parsed successfully but contains no rows.")
+
+    df = normalize_column_names(df)
+
     dataset = Dataset(
         user_id=current_user.id,
-        name=name or file.filename,
-        filename=file.filename,
+        name=name or original_name,
+        filename=original_name,
         file_path=file_path,
         file_size=len(content),
         num_rows=len(df),
@@ -162,7 +170,7 @@ async def upload_dataset(
         columns_info=analyze_dataframe(df),
         target_column=target_column,
         is_example=False,
-        preview_data=df.head(10).fillna("").to_dict(orient="records"),
+        preview_data=build_preview(df),
     )
     db.add(dataset)
     db.commit()
@@ -185,17 +193,34 @@ async def load_example_dataset(
         db.query(Dataset)
         .filter(
             Dataset.user_id == current_user.id,
-            Dataset.is_example == True,
+            Dataset.is_example.is_(True),
             Dataset.name == meta["name"],
         )
         .first()
     )
-    if existing:
+    # Reuse the row only if its file survived; otherwise rewrite it in place so
+    # example datasets always work after a restart wipes storage.
+    if existing and existing.file_available:
         return existing
 
     df = meta["loader"]()
-    file_path = os.path.join(settings.DATASET_STORAGE_PATH, f"user_{current_user.id}_{meta['filename']}")
+    os.makedirs(settings.DATASET_STORAGE_PATH, exist_ok=True)
+    file_path = os.path.join(
+        settings.DATASET_STORAGE_PATH, f"user_{current_user.id}_{meta['filename']}"
+    )
     df.to_csv(file_path, index=False)
+
+    if existing:
+        existing.file_path = file_path
+        existing.file_size = os.path.getsize(file_path)
+        existing.num_rows = len(df)
+        existing.num_columns = len(df.columns)
+        existing.columns_info = analyze_dataframe(df)
+        existing.preview_data = build_preview(df)
+        db.commit()
+        db.refresh(existing)
+        logger.info("Example dataset restored for user=%s name=%s", current_user.id, meta["name"])
+        return existing
 
     dataset = Dataset(
         user_id=current_user.id,
@@ -209,7 +234,7 @@ async def load_example_dataset(
         target_column=meta["target"],
         task_type=meta["task_type"],
         is_example=True,
-        preview_data=df.head(10).fillna("").to_dict(orient="records"),
+        preview_data=build_preview(df),
     )
     db.add(dataset)
     db.commit()
@@ -247,9 +272,10 @@ def get_dataset_analysis(
     current_user: User = Depends(get_current_user),
 ):
     dataset = get_owned_dataset_or_404(dataset_id, current_user.id, db)
+    file_path = require_dataset_file(dataset)
 
     try:
-        df = load_dataset_dataframe(dataset.file_path)
+        df = load_dataset_dataframe(file_path)
         analysis = generate_dataset_analysis(df, dataset.target_column)
         analysis["explainability"] = build_explainability_payload(dataset.id, current_user.id, db)
         return analysis
@@ -282,9 +308,41 @@ def delete_dataset(
 ):
     dataset = get_owned_dataset_or_404(dataset_id, current_user.id, db)
 
-    if os.path.exists(dataset.file_path):
-        os.remove(dataset.file_path)
+    # Collect model artifacts before the ORM cascade removes their rows -
+    # otherwise the files stay on disk forever with nothing referencing them.
+    job_ids = [
+        job_id
+        for (job_id,) in db.query(TrainingJob.job_id)
+        .filter(TrainingJob.dataset_id == dataset.id)
+        .all()
+    ]
+    model_paths = []
+    if job_ids:
+        model_paths = [
+            path
+            for (path,) in db.query(TrainedModel.file_path)
+            .filter(TrainedModel.job_id.in_(job_ids))
+            .all()
+            if path
+        ]
 
     db.delete(dataset)
     db.commit()
-    return {"message": "Dataset deleted successfully"}
+
+    removed = 0
+    for path in [dataset.file_path, *model_paths]:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError as exc:
+                logger.warning("Could not remove file %s: %s", path, exc)
+
+    logger.info(
+        "Dataset %s deleted | jobs=%s artifacts_removed=%s", dataset_id, len(job_ids), removed
+    )
+    return {
+        "message": "Dataset deleted along with its training jobs and models.",
+        "jobs_removed": len(job_ids),
+        "artifacts_removed": removed,
+    }

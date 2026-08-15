@@ -23,6 +23,10 @@ storage/
 *.joblib
 *.pkl
 
+# Logs
+logs/
+*.log
+
 # Database
 *.db
 *.sqlite3

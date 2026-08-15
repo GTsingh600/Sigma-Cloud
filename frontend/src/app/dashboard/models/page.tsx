@@ -30,8 +30,17 @@ import {
   WandSparkles,
 } from "lucide-react";
 
-import { metricsAPI, modelsAPI, trainingAPI } from "@/lib/api";
+import { describeApiError, metricsAPI, modelsAPI, trainingAPI } from "@/lib/api";
 import { MetricsData, TrainedModel } from "@/types";
+
+/** Downloads require an auth header, so they go through XHR, not an <a href>. */
+async function downloadModel(id: number, modelName: string) {
+  try {
+    await modelsAPI.download(id, modelName);
+  } catch (error) {
+    toast.error(describeApiError(error, "Download failed"));
+  }
+}
 
 const COLORS = ["#81A6C6", "#AACDDC", "#F3E3D0", "#D2C4B4", "#97B7D0", "#E6D8C7"];
 
@@ -257,9 +266,14 @@ export default function ModelsPage() {
                   <button onClick={e => { e.stopPropagation(); deployModel(model.id); }} className="btn-outline text-xs py-1.5 justify-center flex-1">
                     <Rocket className="w-3 h-3" /> Deploy
                   </button>
-                  <a href={modelsAPI.download(model.id)} download className="btn-outline text-xs py-1.5 px-2.5" onClick={e => e.stopPropagation()}>
+                  <button
+                    type="button"
+                    onClick={e => { e.stopPropagation(); downloadModel(model.id, model.model_name); }}
+                    className="btn-outline text-xs py-1.5 px-2.5"
+                    aria-label={`Download ${model.model_name}`}
+                  >
                     <Download className="w-3 h-3" />
-                  </a>
+                  </button>
                 </div>
               </div>
             ))}

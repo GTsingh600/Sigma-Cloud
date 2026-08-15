@@ -1,8 +1,17 @@
 "use client";
 import { useState, useEffect } from "react";
-import { modelsAPI } from "@/lib/api";
+import { describeApiError, modelsAPI } from "@/lib/api";
 import toast from "react-hot-toast";
 import { Rocket, Download, CheckCircle, XCircle, Trash2, Loader2, Shield } from "lucide-react";
+
+/** Downloads require an auth header, so they go through XHR, not an <a href>. */
+async function downloadModel(id: number, modelName: string) {
+  try {
+    await modelsAPI.download(id, modelName);
+  } catch (error) {
+    toast.error(describeApiError(error, "Download failed"));
+  }
+}
 
 export default function DeployPage() {
   const [allModels, setAllModels] = useState<any[]>([]);
@@ -153,9 +162,14 @@ export default function DeployPage() {
                               <Rocket className="w-3 h-3" /> Deploy
                             </button>
                           )}
-                          <a href={modelsAPI.download(m.id)} download className="p-1.5 rounded hover:bg-sigma-800 text-sigma-500 hover:text-sigma-300 transition-colors">
+                          <button
+                            type="button"
+                            onClick={() => downloadModel(m.id, m.model_name)}
+                            className="p-1.5 rounded hover:bg-sigma-800 text-sigma-500 hover:text-sigma-300 transition-colors"
+                            aria-label={`Download ${m.model_name}`}
+                          >
                             <Download className="w-3.5 h-3.5" />
-                          </a>
+                          </button>
                           <button onClick={() => deleteModel(m.id)} className="p-1.5 rounded hover:bg-sigma-500/10 text-sigma-500 hover:text-sigma-400 transition-colors">
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>

@@ -82,7 +82,11 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
+        # NEXT_PUBLIC_* values are inlined at BUILD time, so they must be build
+        # args - setting them only under `environment` has no effect on the
+        # compiled bundle.
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${NEXT_PUBLIC_GOOGLE_CLIENT_ID:-}
     container_name: sigmacloud_frontend
     restart: unless-stopped
     environment:

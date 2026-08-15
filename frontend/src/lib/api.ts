@@ -1,11 +1,17 @@
 import axios from "axios";
-import type { AuthResponse, User } from "@/types";
+import type { AuthResponse, HealthStatus, User } from "@/types";
 import { logToFile } from "./logger";
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
 const API_BASE_URL = API_URL ? `${API_URL}/api` : "/api";
 
 export const AUTH_TOKEN_KEY = "sigmacloud_auth_token";
+
+/**
+ * Free hosting tiers sleep when idle and take up to a minute to wake, so the
+ * default timeout is deliberately generous. Training calls get longer still.
+ */
+export const COLD_START_TIMEOUT_MS = 90_000;
 
 let authToken: string | null = null;
 
@@ -20,7 +26,7 @@ function readStoredToken(): string | null {
 export const api = axios.create({
   baseURL: API_BASE_URL,
   headers: { "Content-Type": "application/json" },
-  timeout: 120000,
+  timeout: COLD_START_TIMEOUT_MS,
 });
 
 export function setAuthToken(token: string | null) {
@@ -66,6 +72,32 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+/** Pull a readable message out of an axios error, including 422 detail objects. */
+export function describeApiError(error: unknown, fallback = "Something went wrong"): string {
+  const detail = (error as any)?.response?.data?.detail;
+
+  if (typeof detail === "string") return detail;
+  if (detail?.message) {
+    const missing: string[] | undefined = detail.missing_features;
+    return missing?.length ? `${detail.message} (${missing.join(", ")})` : detail.message;
+  }
+  if (Array.isArray(detail) && detail[0]?.msg) return detail[0].msg;
+
+  const code = (error as any)?.code;
+  if (code === "ECONNABORTED") {
+    return "The server took too long to respond. It may still be waking up - try again.";
+  }
+  if ((error as any)?.message === "Network Error") {
+    return "Could not reach the API. Check that the backend is running.";
+  }
+
+  return (error as any)?.message || fallback;
+}
+
+export const healthAPI = {
+  check: () => api.get<HealthStatus>("/health", { timeout: COLD_START_TIMEOUT_MS }),
+};
+
 export const datasetsAPI = {
   upload: (formData: FormData) =>
     api.post("/upload-dataset", formData, { headers: { "Content-Type": "multipart/form-data" } }),
@@ -102,9 +134,27 @@ export const modelsAPI = {
   get: (id: number) => api.get(`/models/${id}`),
   deploy: (id: number) => api.post(`/models/${id}/deploy`),
   undeploy: (id: number) => api.post(`/models/${id}/undeploy`),
-  download: (id: number) => (API_URL ? `${API_URL}/api/models/${id}/download` : `/api/models/${id}/download`),
   delete: (id: number) => api.delete(`/models/${id}`),
   listDeployed: () => api.get("/deployed-models"),
+  getFeatures: (id: number) => api.get(`/models/${id}/features`),
+
+  /**
+   * Downloads through XHR rather than a plain <a href>.
+   *
+   * The endpoint requires an Authorization header, which a link element cannot
+   * send - the old anchor-based download always came back 401.
+   */
+  download: async (id: number, modelName: string) => {
+    const response = await api.get(`/models/${id}/download`, { responseType: "blob" });
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${modelName.replace(/\s+/g, "_")}_${id}.joblib`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  },
 };
 
 export const metricsAPI = {

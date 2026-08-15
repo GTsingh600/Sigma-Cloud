@@ -1,0 +1,70 @@
+# Render blueprint for the SigmaCloud AI backend.
+#
+# Makes the service reproducible instead of dashboard-only. Apply with:
+#   Render Dashboard > Blueprints > New Blueprint Instance
+#
+# Values marked sync:false must be filled in on Render - they are secrets or
+# environment-specific URLs and are deliberately not committed.
+
+databases:
+  - name: sigmacloud-db
+    databaseName: sigmacloud
+    user: sigma
+    plan: free
+
+services:
+  - type: web
+    name: sigmacloud-api
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+
+      # Supplied by the managed database above. Render emits a `postgres://`
+      # URL; the app rewrites the scheme to `postgresql://` for SQLAlchemy 2.x.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sigmacloud-db
+          property: connectionString
+
+      # Generated once by Render and kept stable across deploys. Rotating it
+      # signs out every user and invalidates saved connection credentials.
+      - key: JWT_SECRET_KEY
+        generateValue: true
+
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+
+      # Exact frontend origin(s), JSON array. Do NOT widen this to all of
+      # vercel.app - that lets any site on the platform call this API.
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+      # One worker: each loads the full sklearn/XGBoost/LightGBM stack, which
+      # does not fit twice in a 512MB free instance.
+      - key: WEB_CONCURRENCY
+        value: "1"
+
+      # Free tier has an ephemeral disk. Attach a Render Disk mounted at
+      # /app/storage to make these durable, otherwise datasets and trained
+      # models are cleared whenever the service restarts.
+      - key: MODEL_STORAGE_PATH
+        value: /app/storage/models
+      - key: DATASET_STORAGE_PATH
+        value: /app/storage/datasets
+
+      - key: LOG_TO_FILE
+        value: "false"
+      - key: MAX_UPLOAD_BYTES
+        value: "26214400"
+
+# To make storage durable, uncomment and redeploy (requires a paid instance):
+#
+#    disk:
+#      name: sigmacloud-storage
+#      mountPath: /app/storage
+#      sizeGB: 1
